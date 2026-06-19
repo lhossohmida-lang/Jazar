@@ -1,0 +1,96 @@
+rules_version = '2';
+
+// ===== JEZAR — قواعد أمان Cloud Firestore =====
+// صلاحيات حسب الدور (Role-Based Access):
+//   - admin : صلاحية كاملة على كل المجموعات
+//   - worker: تسجيل المبيعات + قراءة المنتجات/المخزون + خصم الكمية فقط
+//
+// ملاحظة: تُقرأ أدوار المستخدمين من المجموعة users/{uid}.role
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function role() {
+      return isSignedIn() ? userDoc().role : 'guest';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && role() == 'admin';
+    }
+
+    // المفاتيح التي تغيّرت في عملية تحديث
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // ----- المستخدمون -----
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    // ----- المنتجات -----
+    // الجميع (مسجّل) يقرأ. المدير يكتب بحرية.
+    // العامل يُسمح له بتعديل الكمية فقط (نتيجة البيع/الذبح).
+    match /products/{id} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isSignedIn() && changedKeys().hasOnly(['quantity']));
+    }
+
+    // ----- المبيعات -----
+    // أي مستخدم مسجّل ينشئ ويقرأ. التعديل والحذف للمدير فقط.
+    match /sales/{id} {
+      allow read, create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // ----- الأطراف (زبائن/موردون) -----
+    // المدير يدير. العامل يحدّث الرصيد فقط (للبيع الآجل).
+    match /parties/{id} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isSignedIn() && changedKeys().hasOnly(['balance']));
+    }
+
+    // ----- دفتر الديون -----
+    match /ledger/{id} {
+      allow read, create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // ----- الإشعارات -----
+    // الإنشاء وتعليم كمقروء متاح للجميع، الحذف للمدير.
+    match /notifications/{id} {
+      allow read, create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isAdmin();
+    }
+
+    // ----- المجموعات الحساسة (مدير فقط) -----
+    match /slaughters/{id} {
+      allow read, write: if isAdmin();
+    }
+    match /expenses/{id} {
+      allow read, write: if isAdmin();
+    }
+    match /workers/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    // منع أي وصول غير معرّف صراحةً
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
